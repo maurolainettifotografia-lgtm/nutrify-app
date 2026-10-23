@@ -17,7 +17,7 @@ from pymongo.errors import DuplicateKeyError
 import uuid
 from datetime import datetime, timezone, timedelta, date as date_cls
 import httpx
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 
 from taco_foods import search_taco, find_taco, TACO_NAMES
 import workouts_lib
@@ -62,6 +62,11 @@ async def ready():
         raise HTTPException(status_code=503, detail="Banco de dados indisponível")
     return {"status": "ready"}
 
+
+@app.get("/privacy", include_in_schema=False)
+@app.get("/delete-account", include_in_schema=False)
+async def public_privacy():
+    return FileResponse(ROOT_DIR / "privacy.html", media_type="text/html; charset=utf-8")
 
 api_router = APIRouter(prefix="/api")
 
@@ -1760,3 +1765,4 @@ async def _create_indexes():
     await db.favorites.create_index([("user_id", 1), ("created_at", -1)])
     await db.custom_foods.create_index([("user_id", 1), ("created_at", -1)])
     await db.recipes.create_index([("user_id", 1), ("created_at", -1)])
+
