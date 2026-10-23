@@ -30,8 +30,9 @@ class LlmChat:
     def __init__(self, api_key, session_id, system_message, initial_messages=None):
         self.api_key = api_key
         self.messages = list(initial_messages) if initial_messages is not None else [{'role': 'system', 'content': system_message}]
-        self.model = os.environ['OPENAI_MODEL']
-        self.endpoint = 'https://api.openai.com/v1/chat/completions'
+        self.groq = bool(os.environ.get('GROQ_API_KEY'))
+        self.model = os.environ['GROQ_MODEL' if self.groq else 'OPENAI_MODEL']
+        self.endpoint = 'https://api.groq.com/openai/v1/chat/completions' if self.groq else 'https://api.openai.com/v1/chat/completions'
 
     def with_model(self, provider, model):
         # O modelo é escolhido no backend; não reutiliza aliases específicos da Emergent.
@@ -47,8 +48,13 @@ class LlmChat:
                 if b64.startswith('iVBOR'): prefix = 'image/png'
                 elif b64.startswith('UklGR'): prefix = 'image/webp'
                 content.append({'type': 'image_url', 'image_url': {'url': f'data:{prefix};base64,{b64}'}})
-        return {'model': self.model, 'messages': self.messages + [{'role': 'user', 'content': content}],
-                'stream': stream, 'store': False, 'max_completion_tokens': 2000}
+        payload = {'model': self.model, 'messages': self.messages + [{'role': 'user', 'content': content}],
+                   'stream': stream, 'max_completion_tokens': 2000}
+        if self.groq:
+            payload['reasoning_effort'] = 'none'
+        else:
+            payload['store'] = False
+        return payload
 
     async def send_message(self, message):
         async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10)) as client:
@@ -78,3 +84,4 @@ class LlmChat:
                         delta = choices[0].get('delta', {}).get('content')
                         if delta: yield TextDelta(delta)
         yield StreamDone()
+

@@ -161,13 +161,18 @@ async def check_ai_quota(user: Dict[str, Any], kind: str):
 
 
 def ai_api_key():
-    return os.environ.get("OPENAI_API_KEY") or EMERGENT_LLM_KEY
+    return os.environ.get("GROQ_API_KEY") or os.environ.get("OPENAI_API_KEY") or EMERGENT_LLM_KEY
 
 
 def ai_chat_types(user):
     """IA é opcional; a API principal funciona sem o SDK privado da plataforma."""
     if not _consent_ok(user, "ai_processing"):
         raise HTTPException(status_code=403, detail="Para usar os recursos de IA, aceite o uso de IA em Perfil > Privacidade.")
+    if os.environ.get("GROQ_API_KEY"):
+        if not os.environ.get("GROQ_MODEL", "").strip():
+            raise HTTPException(status_code=503, detail="Configure GROQ_MODEL no servidor.")
+        import ai_direct
+        return ai_direct
     if os.environ.get("OPENAI_API_KEY"):
         if not os.environ.get("OPENAI_MODEL", "").strip():
             raise HTTPException(status_code=503, detail="Configure OPENAI_MODEL no servidor.")
@@ -1765,4 +1770,5 @@ async def _create_indexes():
     await db.favorites.create_index([("user_id", 1), ("created_at", -1)])
     await db.custom_foods.create_index([("user_id", 1), ("created_at", -1)])
     await db.recipes.create_index([("user_id", 1), ("created_at", -1)])
+
 
