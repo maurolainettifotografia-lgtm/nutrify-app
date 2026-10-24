@@ -23,6 +23,8 @@ from taco_foods import search_taco, find_taco, TACO_NAMES
 import workouts_lib
 import password_auth
 import apple_auth
+import strava_integration
+import asyncio
 import secrets
 
 ROOT_DIR = Path(__file__).parent
@@ -35,14 +37,25 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
+strava = strava_integration.StravaIntegration(db)
+
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
 @asynccontextmanager
 async def lifespan(_app):
     await _create_indexes()
+    await strava.indexes()
+    worker = asyncio.create_task(strava.worker())
     logger.info("Nutrify backend started")
-    yield
-    client.close()
+    try:
+        yield
+    finally:
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+        client.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -572,7 +585,7 @@ async def delete_account(user: Dict[str, Any] = Depends(get_current_user)):
 USER_DATA_COLLECTIONS = [
     "user_sessions", "profiles", "diary", "weights", "water", "workouts",
     "recipes", "favorites", "custom_foods", "chat_messages", "ai_usage",
-    "routines", "workout_sessions",
+    "routines", "workout_sessions", "strava_connections", "strava_states", "strava_activities",
 ]
 
 
@@ -1731,6 +1744,7 @@ async def export_account(user: Dict[str, Any] = Depends(get_current_user)):
     return out
 
 
+strava.install(api_router, get_current_user)
 password_auth.install_routes(api_router, db)
 
 app.include_router(api_router)
