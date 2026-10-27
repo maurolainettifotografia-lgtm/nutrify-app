@@ -981,6 +981,12 @@ async def estimate_meal_text(data: MealTextInput, user: Dict[str, Any] = Depends
     try:
         response = await chat.send_message(ai.UserMessage(text=json.dumps({"meal_description": data.text}, ensure_ascii=False)))
         estimate = parse_estimate(str(response))
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        logger.warning("AI meal provider unavailable: status=%s", status)
+        if status == 429:
+            raise HTTPException(429, "A IA atingiu um limite temporário de uso. Aguarde alguns minutos e tente novamente; sua descrição continua aqui.")
+        raise HTTPException(503, "O serviço de IA está temporariamente indisponível. Tente novamente em alguns minutos.")
     except Exception as exc:
         fields = [(str(error.get("loc")), error.get("type")) for error in exc.errors()] if hasattr(exc, "errors") else []
         logger.warning("AI meal estimate failed: kind=%s fields=%s", type(exc).__name__, fields)
