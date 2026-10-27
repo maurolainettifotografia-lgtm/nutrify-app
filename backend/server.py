@@ -64,7 +64,7 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health", include_in_schema=False)
 @app.head("/health", include_in_schema=False)
 async def health():
-    return {"status": "ok", "version": "1.2.1-api"}
+    return {"status": "ok", "version": "1.2.3-api"}
 
 
 @app.get("/ready", include_in_schema=False)
@@ -1329,66 +1329,34 @@ async def get_reports(period: Literal["week", "month"] = "week", user: Dict[str,
 # AI food recognition
 # ---------------------------------------------------------------------------
 class RecognizeInput(BaseModel):
-    image_base64: str = Field(max_length=4_000_000)  # ~3 MB de imagem
+    image_base64: str = Field(min_length=1, max_length=4_000_000)
 
 
 @api_router.post("/ai/recognize")
 async def recognize_food(data: RecognizeInput, user: Dict[str, Any] = Depends(get_current_user)):
+    from food_vision import PHOTO_PROMPT, prepare_photo, parse_photo
     ai = ai_chat_types(user)
+    try:
+        b64 = prepare_photo(data.image_base64)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
     await check_ai_quota(user, "recognize")
-    LlmChat, UserMessage, ImageContent = ai.LlmChat, ai.UserMessage, ai.ImageContent
-
-    b64 = data.image_base64
-    if "," in b64 and b64.strip().startswith("data:"):
-        b64 = b64.split(",", 1)[1]
-
-    system = (
-        "Você é um nutricionista que identifica alimentos em fotos. "
-        "Responda SOMENTE com JSON válido, sem texto extra. "
-        'Formato: {"foods":[{"name":"...","grams":<número estimado da porção em g>,'
-        '"calories":<kcal totais da porção>,"protein":<g>,"carbs":<g>,"fat":<g>}],'
-        '"note":"breve observação em português"}. '
-        "Estime valores com base em porções típicas brasileiras. "
-        "Se não houver comida na imagem, retorne foods vazio e explique na note."
-    )
-    chat = LlmChat(api_key=ai_api_key(), session_id=f"recognize_{new_id()}", system_message=system).with_model("openai", "gpt-5.6-terra")
-    msg = UserMessage(
-        text="Identifique os alimentos nesta foto e estime a composição nutricional de cada um.",
-        file_contents=[ImageContent(image_base64=b64)],
-    )
+    chat = ai.LlmChat(api_key=ai_api_key(), session_id=f"recognize_{new_id()}", system_message=PHOTO_PROMPT).with_model("openai", "gpt-5.6-terra")
+    if hasattr(chat, "json_mode"):
+        chat.json_mode = True
     try:
-        resp = await chat.send_message(msg)
-    except Exception as e:
-        logger.error(f"AI recognize failed: {e}")
-        raise HTTPException(status_code=502, detail="Falha ao analisar a imagem")
-
-    text = resp if isinstance(resp, str) else str(resp)
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
-        return {"foods": [], "note": "Não foi possível interpretar a imagem."}
-    try:
-        parsed = json.loads(m.group(0))
-    except Exception:
-        return {"foods": [], "note": "Não foi possível interpretar a imagem."}
-
-    foods = []
-    for f in parsed.get("foods", []):
-        try:
-            # A IA pode errar: limita a valores fisicamente possiveis (um macro nunca
-            # pesa mais que a propria porcao) para nao quebrar a validacao do diario.
-            grams = min(max(round(float(f.get("grams", 100)), 0), 1), 5000)
-            clamp = lambda x, hi: min(max(float(x), 0.0), hi)  # noqa: E731
-            foods.append({
-                "name": str(f.get("name", "Alimento"))[:120],
-                "grams": grams,
-                "calories": round(clamp(f.get("calories", 0), grams * 9.5), 1),
-                "protein": round(clamp(f.get("protein", 0), grams), 1),
-                "carbs": round(clamp(f.get("carbs", 0), grams), 1),
-                "fat": round(clamp(f.get("fat", 0), grams), 1),
-            })
-        except Exception:
-            continue
-    return {"foods": foods, "note": parsed.get("note", "")}
+        response = await chat.send_message(ai.UserMessage(text="Identifique os alimentos visíveis e estime as porções e macros.", file_contents=[ai.ImageContent(image_base64=b64)]))
+        estimate = parse_photo(response)
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        logger.warning("Food vision provider unavailable: status=%s", status)
+        if status == 429:
+            raise HTTPException(429, "A IA atingiu um limite temporário de uso. Aguarde alguns minutos e tente novamente. Sua foto continua selecionada.")
+        raise HTTPException(503, "O serviço de análise de fotos está temporariamente indisponível. Tente novamente em alguns minutos.")
+    except Exception as exc:
+        logger.warning("Food vision failed: kind=%s", type(exc).__name__)
+        raise HTTPException(502, "Não foi possível interpretar esta foto. Tente novamente ou escolha uma foto mais nítida.")
+    return {"foods": [{key: value for key, value in item.model_dump().items() if key != "portion"} for item in estimate.foods], "note": estimate.note}
 
 
 # ---------------------------------------------------------------------------

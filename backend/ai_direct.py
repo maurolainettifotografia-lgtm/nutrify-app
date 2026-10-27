@@ -49,12 +49,16 @@ class LlmChat:
                 if b64.startswith('iVBOR'): prefix = 'image/png'
                 elif b64.startswith('UklGR'): prefix = 'image/webp'
                 content.append({'type': 'image_url', 'image_url': {'url': f'data:{prefix};base64,{b64}'}})
-        payload = {'model': self.model, 'messages': self.messages + [{'role': 'user', 'content': content}],
+        model = os.environ.get('GROQ_VISION_MODEL' if self.groq else 'OPENAI_VISION_MODEL', self.model) if message.file_contents else self.model
+        payload = {'model': model, 'messages': self.messages + [{'role': 'user', 'content': content}],
                    'stream': stream, 'max_completion_tokens': 2000}
         if self.json_mode and not stream:
             payload["response_format"] = {"type": "json_object"}
         if self.groq:
-            payload['reasoning_effort'] = 'none'
+            if model.startswith('qwen/'):
+                payload['reasoning_effort'] = 'none'
+            elif model.startswith('openai/gpt-oss'):
+                payload['reasoning_effort'] = 'low'
         else:
             payload['store'] = False
         return payload
