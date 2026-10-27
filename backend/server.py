@@ -64,7 +64,7 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health", include_in_schema=False)
 @app.head("/health", include_in_schema=False)
 async def health():
-    return {"status": "ok", "version": "1.2.0-api"}
+    return {"status": "ok", "version": "1.2.1-api"}
 
 
 @app.get("/ready", include_in_schema=False)
@@ -595,7 +595,7 @@ async def delete_account(user: Dict[str, Any] = Depends(get_current_user)):
 
 
 USER_DATA_COLLECTIONS = [
-    "user_sessions", "profiles", "diary", "weights", "water", "workouts",
+    "ai_meal_drafts", "user_sessions", "profiles", "diary", "weights", "water", "workouts",
     "recipes", "favorites", "custom_foods", "chat_messages", "ai_usage",
     "routines", "workout_sessions", "strava_connections", "strava_states", "strava_activities",
 ]
@@ -968,6 +968,78 @@ async def parse_meal_text(data: MealTextInput, user: Dict[str, Any] = Depends(ge
         return parse_meal(data.text)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+
+
+@api_router.post("/ai/meal-estimate")
+async def estimate_meal_text(data: MealTextInput, user: Dict[str, Any] = Depends(get_current_user)):
+    from ai_meal import SYSTEM_PROMPT, parse_estimate, totals
+    ai = ai_chat_types(user)
+    await check_ai_quota(user, "recognize")
+    chat = ai.LlmChat(api_key=ai_api_key(), session_id=f"meal_{new_id()}", system_message=SYSTEM_PROMPT).with_model(*CHAT_MODEL)
+    try:
+        response = await chat.send_message(ai.UserMessage(text=json.dumps({"meal_description": data.text}, ensure_ascii=False)))
+        estimate = parse_estimate(str(response))
+    except Exception:
+        logger.warning("AI meal estimate failed validation or provider request")
+        raise HTTPException(502, "Não foi possível estimar essa refeição. Revise a descrição e tente novamente.")
+    if estimate.clarification:
+        return {"status": "needs_details", "question": estimate.clarification}
+    draft = {"id": new_id("meal_"), "user_id": user["user_id"], "description": data.text,
+             "items": [item.model_dump() for item in estimate.items], "assumptions": estimate.assumptions,
+             "created_at": now_utc(), "expires_at": now_utc() + timedelta(hours=24)}
+    await db.ai_meal_drafts.insert_one(draft)
+    return {"status": "estimated", "draft_id": draft["id"], "items": draft["items"],
+            "totals": totals(draft["items"]), "assumptions": draft["assumptions"],
+            "notice": "Estimativa da IA. Porções, preparo e ingredientes podem alterar os valores."}
+
+
+class SaveAiMealInput(BaseModel):
+    date: DateStr
+    meal: MealKey
+    draft_id: str = Field(pattern=r"^meal_[a-f0-9]{12}$")
+    item_indices: List[Annotated[int, Field(ge=0, le=15, strict=True)]] = Field(min_length=1, max_length=16)
+
+    @field_validator("item_indices")
+    @classmethod
+    def unique_items(cls, items):
+        if len(set(items)) != len(items):
+            raise ValueError("Itens repetidos na refeição")
+        return items
+
+
+@api_router.post("/diary/ai-meal")
+async def save_ai_meal(data: SaveAiMealInput, user: Dict[str, Any] = Depends(get_current_user)):
+    from ai_meal import totals
+    import hashlib
+    identity = hashlib.sha256(f"ai:{user['user_id']}:{data.draft_id}".encode()).hexdigest()
+    existing = await db.diary.find_one({"_id": identity, "user_id": user["user_id"]}, {"_id": 0})
+    if existing:
+        if existing.get("deleted_at") or existing["date"] != data.date or existing["meal"] != data.meal or existing.get("ai_item_indices") != data.item_indices:
+            raise HTTPException(409, "Esta estimativa já foi salva. Gere uma nova para registrar outra refeição.")
+        return existing
+    draft = await db.ai_meal_drafts.find_one({"id": data.draft_id, "user_id": user["user_id"], "expires_at": {"$gt": now_utc()}})
+    if not draft or any(index >= len(draft["items"]) for index in data.item_indices):
+        raise HTTPException(422, "A estimativa expirou ou os itens são inválidos. Calcule novamente.")
+    portions = [draft["items"][index] for index in data.item_indices]
+    grams = sum(item["grams"] for item in portions)
+    items = [{**item, **{key: item[key] * 100 / item["grams"] for key in ("calories", "protein", "carbs", "fat")}} for item in portions]
+    summary = totals(portions)
+    doc = {"_id": identity, "id": identity, "user_id": user["user_id"], "date": data.date, "meal": data.meal,
+           "name": "; ".join(f"{item['portion']} de {item['name']}" for item in portions)[:200],
+           "grams": grams, "source": "ai_text", "estimated": True, "items": items,
+           "assumptions": draft["assumptions"], "description": draft["description"],
+           "ai_item_indices": data.item_indices, "created_at": now_utc(), "deleted_at": None}
+    for key in ("calories", "protein", "carbs", "fat"):
+        doc[key] = summary[key] * 100 / grams
+    try:
+        await db.diary.insert_one(doc)
+    except DuplicateKeyError:
+        existing = await db.diary.find_one({"_id": identity, "user_id": user["user_id"]}, {"_id": 0})
+        if existing["date"] != data.date or existing["meal"] != data.meal or existing.get("ai_item_indices") != data.item_indices:
+            raise HTTPException(409, "Esta estimativa já foi salva com outros itens.")
+        return existing
+    doc.pop("_id", None)
+    return doc
 
 
 class MealItemInput(BaseModel):
@@ -1816,6 +1888,7 @@ async def put_consent(data: ConsentInput, user: Dict[str, Any] = Depends(get_cur
 
 
 EXPORT_COLLECTIONS = [
+    "ai_meal_drafts",
     "profiles", "diary", "weights", "water", "workouts", "recipes", "favorites",
     "custom_foods", "routines", "workout_sessions", "chat_messages",
 ]
@@ -1864,6 +1937,8 @@ app.add_middleware(
 
 
 async def _create_indexes():
+    await db.ai_meal_drafts.create_index("expires_at", expireAfterSeconds=0)
+    await db.ai_meal_drafts.create_index([("user_id", 1), ("id", 1)], unique=True)
     await db.auth_attempts.create_index("expires_at", expireAfterSeconds=0)
     await db.users.create_index("email", unique=True)
     await db.users.create_index("user_id", unique=True)
