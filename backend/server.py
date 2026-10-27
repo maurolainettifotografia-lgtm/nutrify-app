@@ -976,11 +976,14 @@ async def estimate_meal_text(data: MealTextInput, user: Dict[str, Any] = Depends
     ai = ai_chat_types(user)
     await check_ai_quota(user, "recognize")
     chat = ai.LlmChat(api_key=ai_api_key(), session_id=f"meal_{new_id()}", system_message=SYSTEM_PROMPT).with_model(*CHAT_MODEL)
+    if hasattr(chat, "json_mode"):
+        chat.json_mode = True
     try:
         response = await chat.send_message(ai.UserMessage(text=json.dumps({"meal_description": data.text}, ensure_ascii=False)))
         estimate = parse_estimate(str(response))
-    except Exception:
-        logger.warning("AI meal estimate failed validation or provider request")
+    except Exception as exc:
+        fields = [(str(error.get("loc")), error.get("type")) for error in exc.errors()] if hasattr(exc, "errors") else []
+        logger.warning("AI meal estimate failed: kind=%s fields=%s", type(exc).__name__, fields)
         raise HTTPException(502, "Não foi possível estimar essa refeição. Revise a descrição e tente novamente.")
     if estimate.clarification:
         return {"status": "needs_details", "question": estimate.clarification}

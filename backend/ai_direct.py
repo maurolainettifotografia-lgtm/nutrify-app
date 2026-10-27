@@ -28,6 +28,7 @@ class StreamDone:
 
 class LlmChat:
     def __init__(self, api_key, session_id, system_message, initial_messages=None):
+        self.json_mode = False
         self.api_key = api_key
         self.messages = list(initial_messages) if initial_messages is not None else [{'role': 'system', 'content': system_message}]
         self.groq = bool(os.environ.get('GROQ_API_KEY'))
@@ -50,6 +51,8 @@ class LlmChat:
                 content.append({'type': 'image_url', 'image_url': {'url': f'data:{prefix};base64,{b64}'}})
         payload = {'model': self.model, 'messages': self.messages + [{'role': 'user', 'content': content}],
                    'stream': stream, 'max_completion_tokens': 2000}
+        if self.json_mode and not stream:
+            payload["response_format"] = {"type": "json_object"}
         if self.groq:
             payload['reasoning_effort'] = 'none'
         else:
