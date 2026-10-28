@@ -143,3 +143,16 @@ def test_calorie_sum_does_not_truncate_after_100_records(monkeypatch):
         await db.workouts.insert_many([{'user_id':'test','date':server.today_str(),'calories':10,'deleted_at':None} for _ in range(101)])
         assert await server.day_workout_calories('test',server.today_str())==1010
     mongo_case(monkeypatch,check)
+
+def test_stale_retry_cannot_resurrect_calories_after_concurrent_delete(monkeypatch):
+    async def check(db):
+        first=await server.create_session(payload(), {'user_id':'test'})
+        stale=await db.workout_sessions.find_one({'id':first['id']})
+        await server.delete_session(first['id'], {'user_id':'test'})
+        # In-flight request retains the pre-delete snapshot and reaches its secondary write last.
+        await db.workouts.delete_one({'id':first['workout_id']})
+        with pytest.raises(HTTPException) as error:
+            await server._ensure_session_calories(stale)
+        assert error.value.status_code==409
+        assert await server.day_workout_calories('test',server.today_str())==0
+    mongo_case(monkeypatch,check)

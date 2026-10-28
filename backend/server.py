@@ -1814,7 +1814,10 @@ async def _ensure_session_calories(doc):
             "duration_min": doc["duration_min"], "calories": doc["calories_burned"], "title": doc["routine_name"],
             "session_id": doc["id"], "source": "nutrify_met", "created_at": doc["created_at"], "deleted_at": None,
         }}, upsert=True)
-
+        active = await db.workout_sessions.find_one({"id": doc["id"], "user_id": doc["user_id"], "deleted_at": None}, {"_id": 1})
+        if not active:
+            await db.workouts.update_one({"_id": doc["workout_id"]}, {"$set": {"deleted_at": now_utc()}})
+            raise HTTPException(409, "Este treino foi removido em outra ação. O gasto não será somado.")
 
 
 @api_router.get("/sessions")
